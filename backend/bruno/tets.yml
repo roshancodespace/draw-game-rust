@@ -1,0 +1,11 @@
+info:
+  name: tets
+  type: websocket
+  seq: 3
+
+websocket:
+  url: ws://localhost:3000/ws
+  message:
+    type: json
+    data: "{}"
+  auth: inherit

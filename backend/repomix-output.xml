@@ -1,0 +1,290 @@
+This file is a merged representation of a subset of the codebase, containing specifically included files, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of a subset of the repository's contents that is considered the most important context.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Only files matching these patterns are included: src
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+src/
+  handlers/
+    mod.rs
+    room.rs
+    ws.rs
+  models/
+    mod.rs
+    response.rs
+    room.rs
+  main.rs
+  router.rs
+  state.rs
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="src/handlers/mod.rs">
+mod room;
+mod ws;
+
+pub use room::room_handler;
+pub use ws::ws_handler;
+</file>
+
+<file path="src/handlers/room.rs">
+use axum::{Json, extract::State};
+
+use crate::{models::response::{RoomInfo, RoomResponse}, state::AppState};
+
+pub async fn room_handler(State(state): State<AppState>) -> Json<RoomResponse> {
+    let rooms = state.rooms.read().unwrap();
+    Json(RoomResponse { total: rooms.len(), rooms: rooms.iter().map(|room| RoomInfo { id: room.id.clone(), clients: room.clients.len() }).collect() })
+}
+</file>
+
+<file path="src/handlers/ws.rs">
+use axum::{
+    extract::{State, WebSocketUpgrade, ws::WebSocket},
+    response::IntoResponse,
+};
+use futures::{SinkExt, StreamExt, channel::mpsc};
+use tracing::info;
+
+use crate::state::AppState;
+
+pub async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
+    ws.on_upgrade(move |socket: WebSocket| handle_socket(state, socket))
+}
+
+async fn handle_socket(state: AppState, socket: WebSocket) {
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+    let (tx, mut rx) = mpsc::unbounded();
+
+    let client_id = uuid::Uuid::new_v4().to_string();
+    let room_id = state.join_available_room(client_id.clone(), tx);
+
+    info!(client_id = %client_id, room_id = %room_id, "Client joined room");
+
+    let mut send_task = tokio::spawn(async move {
+        while let Some(msg) = rx.next().await {
+            if ws_sender.send(msg).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    let room_id_clone = room_id.clone();
+    let state_clone = state.clone();
+    let mut recv_task = tokio::spawn(async move {
+        while let Some(Ok(msg)) = ws_receiver.next().await {
+            state_clone.broadcast_to_room(&room_id_clone, msg);
+        }
+    });
+
+    tokio::select! {
+        _ = (&mut send_task) => recv_task.abort(),
+        _ = (&mut recv_task) => send_task.abort(),
+    }
+
+    state.remove_client_from_room(&room_id, &client_id);
+    info!(client_id = %client_id, room_id = %room_id, "Client disconnected from room");
+}
+</file>
+
+<file path="src/models/response.rs">
+use serde::Serialize;
+
+#[derive(Serialize)]
+pub struct RoomResponse {
+    pub total: usize,
+    pub rooms: Vec<RoomInfo>
+}
+
+#[derive(Serialize)]
+pub struct RoomInfo {
+    pub id: String,
+    pub clients: usize,
+}
+</file>
+
+<file path="src/models/room.rs">
+use std::collections::HashMap;
+
+use axum::extract::ws::Message;
+use futures::channel::mpsc;
+use tracing::warn;
+
+#[derive(Clone)]
+pub struct Room {
+    pub id: String,
+    pub clients: HashMap<String, mpsc::UnboundedSender<Message>>,
+}
+
+impl Room {
+    pub fn new(id: String) -> Self {
+        Self {
+            id,
+            clients: HashMap::new(),
+        }
+    }
+
+    pub fn add_client(&mut self, client_id: String, client: mpsc::UnboundedSender<Message>) {
+        self.clients.insert(client_id, client);
+    }
+
+    pub fn remove_client(&mut self, client_id: &str) {
+        self.clients.remove(client_id);
+    }
+
+    pub fn broadcast(&mut self, msg: Message) {
+        self.clients.retain(|client_id, sender| {
+            match sender.unbounded_send(msg.clone()) {
+                Ok(_) => true,
+                Err(err) => {
+                    warn!(client_id = %client_id, error = %err, "Removing dead client");
+                    false
+                }
+            }
+        });
+    }
+}
+</file>
+
+<file path="src/router.rs">
+use axum::{Router, routing::get};
+
+use crate::{
+    handlers::{room_handler, ws_handler},
+    state::AppState,
+};
+
+pub fn get_router(app_state: AppState) -> Router {
+    Router::new()
+        .route("/ws", get(ws_handler))
+        .route("/rooms", get(room_handler))
+        .with_state(app_state)
+}
+</file>
+
+<file path="src/models/mod.rs">
+pub mod room;
+pub mod response;
+</file>
+
+<file path="src/main.rs">
+mod handlers;
+mod models;
+mod router;
+mod state;
+
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt::init();
+
+    let app_state = state::AppState::new();
+    let app = router::get_router(app_state);
+
+    let addr = "0.0.0.0:3000";
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    tracing::info!("Server listening on {addr}");
+    axum::serve(listener, app).await.unwrap();
+}
+</file>
+
+<file path="src/state.rs">
+use std::sync::{Arc, RwLock};
+
+use axum::extract::ws::Message;
+use futures::channel::mpsc;
+
+use crate::models::room::Room;
+
+const MAX_CAPACITY: usize = 4;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub rooms: Arc<RwLock<Vec<Room>>>,
+}
+
+impl AppState {
+    pub fn new() -> Self {
+        Self {
+            rooms: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    pub fn join_available_room(
+        &self,
+        client_id: String,
+        client_sender: mpsc::UnboundedSender<Message>,
+    ) -> String {
+        let mut rooms = self.rooms.write().unwrap();
+
+        for room in rooms.iter_mut() {
+            if room.clients.len() < MAX_CAPACITY {
+                room.add_client(client_id.clone(), client_sender);
+                return room.id.clone();
+            }
+        }
+
+        let new_room_id = uuid::Uuid::new_v4().to_string();
+        let mut new_room = Room::new(new_room_id.clone());
+
+        new_room.add_client(client_id.clone(), client_sender);
+        rooms.push(new_room);
+
+        new_room_id
+    }
+
+    pub fn broadcast_to_room(&self, room_id: &str, msg: Message) {
+        let mut rooms = self.rooms.write().unwrap();
+        if let Some(room) = rooms.iter_mut().find(|r| r.id == room_id) {
+            room.broadcast(msg);
+        }
+    }
+
+    pub fn remove_client_from_room(&self, room_id: &str, client_id: &str) {
+        let mut rooms = self.rooms.write().unwrap();
+        if let Some(room) = rooms.iter_mut().find(|r| r.id == room_id) {
+            room.remove_client(client_id);
+        }
+    }
+}
+</file>
+
+</files>
