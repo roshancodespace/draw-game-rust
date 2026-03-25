@@ -23,13 +23,13 @@ impl AppState {
         &self,
         client_id: String,
         client_sender: mpsc::UnboundedSender<Message>,
-    ) -> String {
+    ) -> Room {
         let mut rooms = self.rooms.write().unwrap();
 
         for room in rooms.iter_mut() {
             if room.clients.len() < MAX_CAPACITY {
                 room.add_client(client_id.clone(), client_sender);
-                return room.id.clone();
+                return room.clone();
             }
         }
 
@@ -37,9 +37,9 @@ impl AppState {
         let mut new_room = Room::new(new_room_id.clone());
 
         new_room.add_client(client_id.clone(), client_sender);
-        rooms.push(new_room);
+        rooms.push(new_room.clone());
 
-        new_room_id
+        new_room
     }
 
     pub fn broadcast_to_room(&self, room_id: &str, msg: Message) {

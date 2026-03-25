@@ -19,9 +19,15 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
     let (tx, mut rx) = mpsc::unbounded();
 
     let client_id = uuid::Uuid::new_v4().to_string();
-    let room_id = state.join_available_room(client_id.clone(), tx);
+    let room = state.join_available_room(client_id.clone(), tx);
 
-    info!(client_id = %client_id, room_id = %room_id, "Client joined room");
+    {
+        info!(client_id = %client_id, room_id = %room.id, "Client joined room");
+        let json = serde_json::to_string(&room.game).unwrap().into();
+        if ws_sender.send(Message::Text(json)).await.is_err() {
+            return;
+        }
+    }
 
     let mut send_task = tokio::spawn(async move {
         while let Some(msg) = rx.next().await {
@@ -31,7 +37,7 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
         }
     });
 
-    let room_id_clone = room_id.clone();
+    let room_id_clone = room.id.clone();
     let state_clone = state.clone();
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_receiver.next().await {
@@ -50,6 +56,6 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
         _ = (&mut recv_task) => send_task.abort(),
     }
 
-    state.remove_client_from_room(&room_id, &client_id);
-    info!(client_id = %client_id, room_id = %room_id, "Client disconnected from room");
+    state.remove_client_from_room(&room.id, &client_id);
+    info!(client_id = %client_id, room_id = %room.id, "Client disconnected from room");
 }
