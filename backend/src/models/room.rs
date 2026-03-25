@@ -4,10 +4,13 @@ use axum::extract::ws::Message;
 use futures::channel::mpsc;
 use tracing::warn;
 
+use crate::models::game::Game;
+
 #[derive(Clone)]
 pub struct Room {
     pub id: String,
     pub clients: HashMap<String, mpsc::UnboundedSender<Message>>,
+    pub game: Game,
 }
 
 impl Room {
@@ -15,6 +18,7 @@ impl Room {
         Self {
             id,
             clients: HashMap::new(),
+            game: Game::new(),
         }
     }
 
