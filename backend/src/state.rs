@@ -14,8 +14,25 @@ pub struct AppState {
 
 impl AppState {
     pub fn new() -> Self {
-        Self {
+        let state = Self {
             rooms: Arc::new(RwLock::new(Vec::new())),
+        };
+
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                state_clone.tick();
+            }
+        });
+
+        state
+    }
+
+    pub fn tick(&self) {
+        let mut rooms = self.rooms.write().unwrap();
+        for room in rooms.iter_mut() {
+            room.tick();
         }
     }
 
@@ -53,6 +70,7 @@ impl AppState {
         let mut rooms = self.rooms.write().unwrap();
         if let Some(room) = rooms.iter_mut().find(|r| r.id == room_id) {
             room.remove_client(client_id);
+            room.tick(); // Check state when a client leaves
         }
     }
 }

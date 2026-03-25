@@ -1,15 +1,26 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
+pub enum GameState {
+    Waiting,
+    Playing,
+    GameOver,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Game {
-    canvas: Canvas,
-    word: String,
-    drawer: String,
+    pub state: GameState,
+    pub round_end_time: Option<u64>,
+    pub canvas: Canvas,
+    pub word: String,
+    pub drawer: String,
 }
 
 impl Game {
     pub fn new() -> Self {
         Self {
+            state: GameState::Waiting,
+            round_end_time: None,
             canvas: Canvas::new(),
             word: String::new(),
             drawer: String::new(),
@@ -19,9 +30,9 @@ impl Game {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Canvas {
-    width: u32,
-    height: u32,
-    pixels: Vec<Pixel>,
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<Pixel>,
 }
 
 impl Canvas {
@@ -36,8 +47,8 @@ impl Canvas {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Pixel {
-    x: u32,
-    y: u32,
-    color: String,
+    pub x: u32,
+    pub y: u32,
+    pub color: String,
 }
 

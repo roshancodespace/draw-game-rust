@@ -23,8 +23,11 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
 
     {
         info!(client_id = %client_id, room_id = %room.id, "Client joined room");
-        let json = serde_json::to_string(&room.game).unwrap().into();
-        if ws_sender.send(Message::Text(json)).await.is_err() {
+        
+        let ws_msg = crate::models::message::WsMessage::Game(room.game.clone());
+        let json = serde_json::to_string(&ws_msg).unwrap();
+        
+        if ws_sender.send(Message::Text(json.into())).await.is_err() {
             return;
         }
     }
