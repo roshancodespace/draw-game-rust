@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::models::{chat::Chat, game::{Canvas, Game}};
+use crate::models::{
+    chat::Chat,
+    game::{Canvas, Game},
+};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub enum WsMessage {

@@ -2,9 +2,12 @@ use std::collections::HashMap;
 
 use axum::extract::ws::Message;
 use futures::channel::mpsc;
-use tracing::warn;
+use tracing::{debug, error, info, warn};
 
-use crate::models::game::Game;
+use crate::models::{
+    game::{Game, GameState},
+    message::WsMessage,
+};
 
 #[derive(Clone)]
 pub struct Room {
@@ -15,6 +18,7 @@ pub struct Room {
 
 impl Room {
     pub fn new(id: String) -> Self {
+        info!(room_id = %id, "room_created");
         Self {
             id,
             clients: HashMap::new(),
@@ -22,53 +26,137 @@ impl Room {
         }
     }
 
-    pub fn add_client(&mut self, client_id: String, client: mpsc::UnboundedSender<Message>) {
-        self.clients.insert(client_id, client);
+    pub fn add_client(&mut self, client_id: &str, client: mpsc::UnboundedSender<Message>) {
+        self.clients.insert(client_id.into(), client);
+        info!(
+            room_id = %self.id,
+            client_id = %client_id,
+            total_clients = self.clients.len(),
+            "client_joined"
+        );
     }
 
     pub fn remove_client(&mut self, client_id: &str) {
-        self.clients.remove(client_id);
+        let existed = self.clients.remove(client_id).is_some();
+        if existed {
+            info!(
+                room_id = %self.id,
+                client_id = %client_id,
+                total_clients = self.clients.len(),
+                "client_left"
+            );
+        } else {
+            warn!(
+                room_id = %self.id,
+                client_id = %client_id,
+                "remove_nonexistent_client"
+            );
+        }
     }
 
-    pub fn broadcast(&mut self, msg: Message) {
+    pub fn broadcast(&mut self, msg: &Message, exclude_client: Option<&str>) {
+        let before = self.clients.len();
+
         self.clients.retain(|client_id, sender| {
+            if let Some(excluded) = exclude_client {
+                if client_id == excluded {
+                    return true;
+                }
+            }
+
             match sender.unbounded_send(msg.clone()) {
                 Ok(_) => true,
                 Err(err) => {
-                    warn!(client_id = %client_id, error = %err, "Removing dead client");
+                    warn!(
+                        room_id = %self.id,
+                        client_id = %client_id,
+                        error = %err,
+                        "client_disconnected_during_broadcast"
+                    );
                     false
                 }
             }
         });
+
+        let after = self.clients.len();
+
+        debug!(
+            room_id = %self.id,
+            attempted = before,
+            delivered = after,
+            dropped = before.saturating_sub(after),
+            "broadcast_complete"
+        );
     }
 
     pub fn tick(&mut self) {
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
 
         match self.game.state {
-            crate::models::game::GameState::Waiting => {
+            GameState::Waiting => {
+                debug!(
+                    room_id = %self.id,
+                    total_players = self.clients.len(),
+                    "state_waiting"
+                );
+
                 if self.clients.len() >= 2 {
+                    info!(
+                        room_id = %self.id,
+                        total_players = self.clients.len(),
+                        "starting_game_from_waiting"
+                    );
                     self.start_game();
                 }
             }
-            crate::models::game::GameState::Playing => {
+            GameState::Playing => {
                 if let Some(end_time) = self.game.round_end_time {
+                    debug!(
+                        room_id = %self.id,
+                        now,
+                        end_time,
+                        remaining = end_time.saturating_sub(now),
+                        "state_playing_tick"
+                    );
+
                     if now >= end_time {
-                        self.game.state = crate::models::game::GameState::GameOver;
-                        self.game.round_end_time = Some(now + 20); // 20s cooldown
-                        self.broadcast_state();
+                        info!(
+                            room_id = %self.id,
+                            "round_finished"
+                        );
+                        self.game.stop(&now);
+                        self.broadcast_game();
                     }
                 }
             }
-            crate::models::game::GameState::GameOver => {
+            GameState::GameOver => {
                 if let Some(end_time) = self.game.round_end_time {
+                    debug!(
+                        room_id = %self.id,
+                        now,
+                        end_time,
+                        "state_gameover_tick"
+                    );
+
                     if now >= end_time {
                         if self.clients.len() >= 2 {
+                            info!(
+                                room_id = %self.id,
+                                total_players = self.clients.len(),
+                                "restarting_game"
+                            );
                             self.start_game();
                         } else {
-                            self.game.state = crate::models::game::GameState::Waiting;
-                            self.game.round_end_time = None;
-                            self.broadcast_state();
+                            info!(
+                                room_id = %self.id,
+                                total_players = self.clients.len(),
+                                "not_enough_players_waiting"
+                            );
+                            self.game.wait();
+                            self.broadcast_game();
                         }
                     }
                 }
@@ -78,24 +166,57 @@ impl Room {
 
     pub fn start_game(&mut self) {
         if self.clients.len() < 2 {
+            warn!(
+                room_id = %self.id,
+                total_players = self.clients.len(),
+                "start_game_rejected_not_enough_players"
+            );
             return;
         }
 
-        let drawer_id = self.clients.keys().next().unwrap().clone();
-        self.game.drawer = drawer_id.clone();
-        self.game.state = crate::models::game::GameState::Playing;
+        let drawer = self.clients.keys().next().unwrap().clone();
 
-        let now = std::time::SystemTime::now();
-        let end_time = now.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 60; // 60s round
-        self.game.round_end_time = Some(end_time);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
 
-        self.broadcast_state();
+        let end_time = now + 60;
+
+        info!(
+            room_id = %self.id,
+            drawer = %drawer,
+            total_players = self.clients.len(),
+            start_time = now,
+            end_time,
+            duration = 60,
+            "game_started"
+        );
+
+        self.game.start(&drawer, &end_time);
+
+        self.broadcast_game();
     }
 
-    pub fn broadcast_state(&mut self) {
-        let msg = crate::models::message::WsMessage::Game(self.game.clone());
-        if let Ok(json) = serde_json::to_string(&msg) {
-            self.broadcast(Message::Text(json.into()));
+    pub fn broadcast_game(&mut self) {
+        let msg = WsMessage::Game(self.game.clone());
+
+        match serde_json::to_string(&msg) {
+            Ok(json) => {
+                debug!(
+                    room_id = %self.id,
+                    payload_size = json.len(),
+                    "broadcasting_game_state"
+                );
+                self.broadcast(&Message::Text(json.into()), None);
+            }
+            Err(err) => {
+                error!(
+                    room_id = %self.id,
+                    error = %err,
+                    "failed_to_serialize_game_state"
+                );
+            }
         }
     }
 }

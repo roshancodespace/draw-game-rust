@@ -38,31 +38,31 @@ impl AppState {
 
     pub fn join_available_room(
         &self,
-        client_id: String,
+        client_id: &str,
         client_sender: mpsc::UnboundedSender<Message>,
     ) -> Room {
         let mut rooms = self.rooms.write().unwrap();
 
         for room in rooms.iter_mut() {
             if room.clients.len() < MAX_CAPACITY {
-                room.add_client(client_id.clone(), client_sender);
+                room.add_client(client_id, client_sender);
                 return room.clone();
             }
         }
 
         let new_room_id = uuid::Uuid::new_v4().to_string();
-        let mut new_room = Room::new(new_room_id.clone());
+        let mut new_room = Room::new(new_room_id);
 
-        new_room.add_client(client_id.clone(), client_sender);
+        new_room.add_client(client_id, client_sender);
         rooms.push(new_room.clone());
 
         new_room
     }
 
-    pub fn broadcast_to_room(&self, room_id: &str, msg: Message) {
+    pub fn broadcast_to_room(&self, room_id: &str, msg: &Message, exclude_client: Option<&str>) {
         let mut rooms = self.rooms.write().unwrap();
         if let Some(room) = rooms.iter_mut().find(|r| r.id == room_id) {
-            room.broadcast(msg);
+            room.broadcast(&msg, exclude_client);
         }
     }
 
@@ -70,7 +70,7 @@ impl AppState {
         let mut rooms = self.rooms.write().unwrap();
         if let Some(room) = rooms.iter_mut().find(|r| r.id == room_id) {
             room.remove_client(client_id);
-            room.tick(); // Check state when a client leaves
+            room.tick();
         }
     }
 }

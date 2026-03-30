@@ -6,7 +6,6 @@ use axum::{
     response::IntoResponse,
 };
 use futures::{SinkExt, StreamExt, channel::mpsc};
-use tracing::info;
 
 use crate::state::AppState;
 
@@ -19,14 +18,12 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
     let (tx, mut rx) = mpsc::unbounded();
 
     let client_id = uuid::Uuid::new_v4().to_string();
-    let room = state.join_available_room(client_id.clone(), tx);
+    let room = state.join_available_room(&client_id, tx);
 
     {
-        info!(client_id = %client_id, room_id = %room.id, "Client joined room");
-        
         let ws_msg = crate::models::message::WsMessage::Game(room.game.clone());
         let json = serde_json::to_string(&ws_msg).unwrap();
-        
+
         if ws_sender.send(Message::Text(json.into())).await.is_err() {
             return;
         }
@@ -42,12 +39,13 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
 
     let room_id_clone = room.id.clone();
     let state_clone = state.clone();
+    let client_id_clone = client_id.clone();
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_receiver.next().await {
             match msg {
                 Message::Close(_) => break,
                 Message::Text(_) | Message::Binary(_) => {
-                    state_clone.broadcast_to_room(&room_id_clone, msg);
+                    state_clone.broadcast_to_room(&room_id_clone, &msg, Some(&client_id_clone));
                 }
                 _ => {}
             }
@@ -60,5 +58,4 @@ async fn handle_socket(state: AppState, socket: WebSocket) {
     }
 
     state.remove_client_from_room(&room.id, &client_id);
-    info!(client_id = %client_id, room_id = %room.id, "Client disconnected from room");
 }
