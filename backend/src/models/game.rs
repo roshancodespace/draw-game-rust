@@ -49,8 +49,8 @@ impl Game {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Canvas {
-    pub width: u32,
-    pub height: u32,
+    pub width: u64,
+    pub height: u64,
     pub pixels: Vec<Pixel>,
 }
 
@@ -62,9 +62,19 @@ impl Canvas {
             pixels: Vec::new(),
         }
     }
+
+    pub fn set_size(&mut self, width: u64, height: u64) {
+        self.height = height;
+        self.width = width;
+    }
+
+    pub fn paint(&mut self, pixel: Pixel) {
+        self.pixels.retain(|p| p != &pixel);
+        self.pixels.push(pixel.clone());
+    }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct Pixel {
     pub x: u32,
     pub y: u32,

@@ -6,7 +6,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::models::{
     game::{Game, GameState},
-    message::WsMessage,
+    message::ServerMessage,
 };
 
 #[derive(Clone)]
@@ -26,6 +26,8 @@ impl Room {
         }
     }
 
+    // ───────────── CLIENT MANAGEMENT ─────────────
+
     pub fn add_client(&mut self, client_id: &str, client: mpsc::UnboundedSender<Message>) {
         self.clients.insert(client_id.into(), client);
         info!(
@@ -37,8 +39,7 @@ impl Room {
     }
 
     pub fn remove_client(&mut self, client_id: &str) {
-        let existed = self.clients.remove(client_id).is_some();
-        if existed {
+        if self.clients.remove(client_id).is_some() {
             info!(
                 room_id = %self.id,
                 client_id = %client_id,
@@ -46,11 +47,7 @@ impl Room {
                 "client_left"
             );
         } else {
-            warn!(
-                room_id = %self.id,
-                client_id = %client_id,
-                "remove_nonexistent_client"
-            );
+            warn!(room_id = %self.id, client_id = %client_id, "remove_nonexistent_client");
         }
     }
 
@@ -58,10 +55,8 @@ impl Room {
         let before = self.clients.len();
 
         self.clients.retain(|client_id, sender| {
-            if let Some(excluded) = exclude_client {
-                if client_id == excluded {
-                    return true;
-                }
+            if exclude_client.map_or(false, |ex| ex == client_id) {
+                return true; // skip excluded client
             }
 
             match sender.unbounded_send(msg.clone()) {
@@ -78,40 +73,47 @@ impl Room {
             }
         });
 
-        let after = self.clients.len();
-
         debug!(
             room_id = %self.id,
             attempted = before,
-            delivered = after,
-            dropped = before.saturating_sub(after),
+            delivered = self.clients.len(),
+            dropped = before.saturating_sub(self.clients.len()),
             "broadcast_complete"
         );
     }
 
+    pub fn broadcast_msg(&mut self, server_msg: &ServerMessage, exclude_client: Option<&str>) {
+        match serde_json::to_string(server_msg) {
+            Ok(json) => self.broadcast(&Message::Text(json.into()), exclude_client),
+            Err(err) => error!(
+                room_id = %self.id,
+                error = %err,
+                "failed_to_serialize_server_message"
+            ),
+        }
+    }
+
+    pub fn broadcast_game(&mut self) {
+        self.broadcast_msg(&ServerMessage::Game(self.game.clone()), None);
+    }
+
+    pub fn broadcast_canvas(&mut self) {
+        self.broadcast_msg(&ServerMessage::Canvas(self.game.canvas.clone()), None);
+    }
+
     pub fn tick(&mut self) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = current_time_secs();
 
         match self.game.state {
             GameState::Waiting => {
-                debug!(
-                    room_id = %self.id,
-                    total_players = self.clients.len(),
-                    "state_waiting"
-                );
+                debug!(room_id = %self.id, total_players = self.clients.len(), "state_waiting");
 
                 if self.clients.len() >= 2 {
-                    info!(
-                        room_id = %self.id,
-                        total_players = self.clients.len(),
-                        "starting_game_from_waiting"
-                    );
+                    info!(room_id = %self.id, total_players = self.clients.len(), "starting_game_from_waiting");
                     self.start_game();
                 }
             }
+
             GameState::Playing => {
                 if let Some(end_time) = self.game.round_end_time {
                     debug!(
@@ -123,38 +125,23 @@ impl Room {
                     );
 
                     if now >= end_time {
-                        info!(
-                            room_id = %self.id,
-                            "round_finished"
-                        );
+                        info!(room_id = %self.id, "round_finished");
                         self.game.stop(&now);
                         self.broadcast_game();
                     }
                 }
             }
+
             GameState::GameOver => {
                 if let Some(end_time) = self.game.round_end_time {
-                    debug!(
-                        room_id = %self.id,
-                        now,
-                        end_time,
-                        "state_gameover_tick"
-                    );
+                    debug!(room_id = %self.id, now, end_time, "state_gameover_tick");
 
                     if now >= end_time {
                         if self.clients.len() >= 2 {
-                            info!(
-                                room_id = %self.id,
-                                total_players = self.clients.len(),
-                                "restarting_game"
-                            );
+                            info!(room_id = %self.id, total_players = self.clients.len(), "restarting_game");
                             self.start_game();
                         } else {
-                            info!(
-                                room_id = %self.id,
-                                total_players = self.clients.len(),
-                                "not_enough_players_waiting"
-                            );
+                            info!(room_id = %self.id, total_players = self.clients.len(), "not_enough_players_waiting");
                             self.game.wait();
                             self.broadcast_game();
                         }
@@ -166,21 +153,12 @@ impl Room {
 
     pub fn start_game(&mut self) {
         if self.clients.len() < 2 {
-            warn!(
-                room_id = %self.id,
-                total_players = self.clients.len(),
-                "start_game_rejected_not_enough_players"
-            );
+            warn!(room_id = %self.id, total_players = self.clients.len(), "start_game_rejected_not_enough_players");
             return;
         }
 
         let drawer = self.clients.keys().next().unwrap().clone();
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
+        let now = current_time_secs();
         let end_time = now + 60;
 
         info!(
@@ -194,29 +172,14 @@ impl Room {
         );
 
         self.game.start(&drawer, &end_time);
-
         self.broadcast_game();
     }
+}
 
-    pub fn broadcast_game(&mut self) {
-        let msg = WsMessage::Game(self.game.clone());
-
-        match serde_json::to_string(&msg) {
-            Ok(json) => {
-                debug!(
-                    room_id = %self.id,
-                    payload_size = json.len(),
-                    "broadcasting_game_state"
-                );
-                self.broadcast(&Message::Text(json.into()), None);
-            }
-            Err(err) => {
-                error!(
-                    room_id = %self.id,
-                    error = %err,
-                    "failed_to_serialize_game_state"
-                );
-            }
-        }
-    }
+#[inline]
+fn current_time_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
